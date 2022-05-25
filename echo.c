@@ -62,8 +62,8 @@ struct sq
     void *ring_ptr;
 
     // Internal tracking of the queue. Has to call uring_sq_submit() to become visible to the kernel
-    unsigned *inner_head;
-    unsigned *inner_tail;
+    unsigned inner_head;
+    unsigned inner_tail;
 };
 
 // Completion Queue
@@ -184,12 +184,12 @@ struct io_uring_sqe *uring_next_sqe(struct uring *uring)
     struct sq *sq = &uring->sq;
     unsigned head = load_acquire(sq->khead);
     struct io_uring_sqe *sqe = NULL;
-    unsigned next = *sq->inner_tail + 1;
+    unsigned next = sq->inner_tail + 1;
 
     if (next - head <= *sq->num_entries)
     {
-        sqe = &sq->sq_entries[*sq->inner_tail & *sq->mask];
-        *sq->inner_tail = next;
+        sqe = &sq->sq_entries[sq->inner_tail & *sq->mask];
+        sq->inner_tail = next;
         // TODO: Can we skip this :?
         memset(sqe, 0, sizeof(*sqe));
     }
@@ -210,15 +210,19 @@ void uring_sq_submit(struct uring *uring)
     {
         while (pending)
         {
-            sq->array[ktail & mask] = *sq->inner_head & mask;
+            sq->array[ktail & mask] = sq->inner_head & mask;
             ktail++;
-            *sq->inner_head++;
+            sq->inner_head++;
             pending--;
         }
     }
 
     // Make the changes visible to the kernel
     store_release(sq->ktail, ktail);
+
+    // Notify the Kernel
+    unsigned to_submit = ktail - *sq->khead;
+    __sys_io_uring_enter(uring->ring_fd, to_submit, 0, 0);
 }
 
 void sqe_set_event(struct io_uring_sqe *sqe, struct event *event)
